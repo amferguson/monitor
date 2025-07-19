@@ -116,19 +116,20 @@ mkfifo packet_pipe
 
 
 #DEFINE DEVICE TRACKING VARS
-declare -A public_device_log
-declare -A random_device_log
-declare -A rssi_log
+declare -Ax public_device_log
+declare -Ax random_device_log
+declare -Ax rssi_log
 
 #STATIC DEVICE ASSOCIATIVE ARRAYS
-declare -A known_public_device_log
-declare -A expiring_device_log
-declare -A known_static_device_scan_log
-declare -A known_public_device_name
-declare -A blacklisted_devices
-declare -A beacon_mac_address_log
-declare -A mqtt_aliases
-declare -A advertisement_interval_observation
+declare -Ax known_public_device_log
+declare -Ax expiring_device_log
+declare -Ax known_static_device_scan_log
+declare -Ax known_public_device_name
+declare -Ax blacklisted_devices
+declare -Ax beacon_mac_address_log
+declare -Ax whitelisted_devices
+declare -Ax mqtt_aliases
+declare -Ax advertisement_interval_observation
 
 #LAST TIME THIS 
 scan_pid=""
@@ -147,15 +148,28 @@ first_arrive_scan=true
 # ----------------------------------------------------------------------------------------
 
 #LOAD PUBLIC ADDRESSES TO SCAN INTO ARRAY, IGNORING COMMENTS
-mapfile -t known_static_beacons < <(sed 's/#.\{0,\}//gi' < "$BEAC_CONFIG" | awk '{print $1}' | grep -oiE "([0-9a-f]{2}:){5}[0-9a-f]{2}" )
-mapfile -t known_static_addresses < <(sed 's/#.\{0,\}//gi' < "$PUB_CONFIG" | awk '{print $1}' | grep -oiE "([0-9a-f]{2}:){5}[0-9a-f]{2}" )
-mapfile -t address_blacklist < <(sed 's/#.\{0,\}//gi' < "$ADDRESS_BLACKLIST" | awk '{print $1}' | grep -oiE "([0-9a-f]{2}:){5}[0-9a-f]{2}" )
+mapfile -t known_static_beacons < <(sed 's/#.\{0,\}//gi' < "$BEAC_CONFIG" | awk '{print $1}' | grep -oiE "(([0-9a-f]{2}:){5}[0-9a-f]{2})|([0-9a-f]{8}-([0-9a-f]{4}-){3}[0-9a-f]{12}-[0-9]+-[0-9]+)")
+mapfile -t known_static_addresses < <(sed 's/#.\{0,\}//gi' < "$PUB_CONFIG" | awk '{print $1}' | grep -oiE "([0-9a-f]{2}:){5}[0-9a-f]{2}")
+mapfile -t address_blacklist < <(sed 's/#.\{0,\}//gi' < "$ADDRESS_BLACKLIST" | awk '{print $1}' | grep -oiE "(([0-9a-f]{2}:){5}[0-9a-f]{2})|([0-9a-f]{8}-([0-9a-f]{4}-){3}[0-9a-f]{12}-[0-9]+-[0-9]+)")
 
 #ASSEMBLE COMMENT-CLEANED BLACKLIST INTO BLACKLIST ARRAY
 for addr in "${address_blacklist[@]^^}"; do 
 	blacklisted_devices[$addr]=1
 	printf "%s\n" "> ${RED}blacklisted device:${NC} $addr"
 done 
+
+#IF WHITELIST MODE, ASSEMBLE WHITELIST FROM KNOWN BEACON FILES
+if [ "$PREF_WHITELIST_ONLY_MODE" == true ]; then
+
+	#INCLUDE WHITELISTED DEVICES
+	for addr in "${known_static_addresses[@]^^}"; do
+        [ -n "$addr" ] && whitelisted_devices[$addr]=1 && printf "%s\n" "> ${GREEN}whitelisted device:${NC} $addr"
+    done
+	#INCLUDE WHITELISTED BEACONS
+    for addr in "${known_static_beacons[@]^^}"; do
+        [ -n "$addr" ] && whitelisted_devices[$addr]=1 && printf "%s\n" "> ${GREEN}whitelisted beacon:${NC} $addr"
+    done
+fi
 
 # ----------------------------------------------------------------------------------------
 # POPULATE MAIN DEVICE ARRAY
@@ -992,6 +1006,14 @@ while true; do
 
 				#DOES THIS DEVICE HAVE A NAME? 
 				if [ -n "$name" ] || [ -n "$expected_name" ]; then 
+					
+					#IF WHITELIST MODE, DO NOT PROMOTE/TRACK UNKNOWN DEVICES
+					if [ "$PREF_WHITELIST_ONLY_MODE" == true ] && [ -z "${whitelisted_devices[$mac]}" ]; then
+						# This device is not on the whitelist, so stop tracking it.
+						unset "random_device_log[$mac]"
+						continue
+					fi
+
 					#RESET COMMAND
 					cmd="PUBL"
 					unset "random_device_log[$mac]"
@@ -1576,8 +1598,22 @@ while true; do
 		#ACTUALLY PUBLIC
 
 		if [ "$cmd" == "PUBL" ]; then 
-			#PARSE RECEIVED DATA
+			#PRE-PARSE TO GET IDENTIFIERS FOR WHITELIST CHECK
 			mac=$(echo "$data" | awk -F "|" '{print $1}')
+
+			#IF WHITELIST MODE, IGNORE THIS DEVICE ENTIRELY IF NOT ON THE LIST
+			if [ "$PREF_WHITELIST_ONLY_MODE" == true ]; then
+				# Check both the MAC and any associated iBeacon UUID
+				local matching_beacon_uuid_key=""
+				for beacon_uuid_key in "${!beacon_mac_address_log[@]}"; do
+					[ "${beacon_mac_address_log[$beacon_uuid_key]}" == "$mac" ] && matching_beacon_uuid_key="$beacon_uuid_key" && break
+				done
+				if [ -z "${whitelisted_devices[$mac]}" ] && [ -z "${whitelisted_devices[$matching_beacon_uuid_key]}" ]; then
+					continue
+				fi
+			fi
+
+			#PARSE RECEIVED DATA
 			pdu_header=$(echo "$data" | awk -F "|" '{print $2}')
 			name=$(echo "$data" | awk -F "|" '{print $3}')
 			rssi=$(echo "$data" | awk -F "|" '{print $4}')
@@ -1678,6 +1714,15 @@ while true; do
 			[ -z "$manufacturer" ] && manufacturer="$(determine_manufacturer "$mac")"
 		
 		elif [ "$cmd" == "BEAC" ]; then 
+
+			#PRE-PARSE TO GET IDENTIFIERS FOR WHITELIST CHECK
+			local temp_mac=$(echo "$data" | awk -F "|" '{print $6}')
+			local temp_uuid_ref="$(echo "$data" | awk -F "|" '{print $1}')-$(echo "$data" | awk -F "|" '{print $2}')-$(echo "$data" | awk -F "|" '{print $3}')"
+
+			#IF WHITELIST MODE, IGNORE THIS DEVICE ENTIRELY IF NOT ON THE LIST
+			if [ "$PREF_WHITELIST_ONLY_MODE" == true ] && [ -z "${whitelisted_devices[$temp_mac]}" ] && [ -z "${whitelisted_devices[$temp_uuid_ref]}" ]; then
+				continue
+			fi
 
 			#DATA IS DELIMITED BY VERTICAL PIPE
 			uuid=$(echo "$data" | awk -F "|" '{print $1}')

@@ -99,6 +99,15 @@ btle_packet_processor () {
 
         timestamp=$(date +%s)
 
+		#IF WHITELIST MODE, ONLY REPORT WHITELISTED DEVICES
+		if [ "$PREF_WHITELIST_ONLY_MODE" == true ]; then
+			local uuid_reference="$UUID-$MAJOR-$MINOR"
+			# Return if neither the MAC nor the UUID reference is in the whitelist
+			if [ -z "${whitelisted_devices[$received_mac_address^^]}" ] && [ -z "${whitelisted_devices[$uuid_reference^^]}" ]; then
+				return 0
+			fi
+		fi
+
 		#SEND TO MAIN LOOP
 		[ -n "$UUID" ] && printf "BEAC$UUID|$MAJOR|$MINOR|$RSSI|$POWER|$received_mac_address|$timestamp\n" > main_pipe 
 	fi
@@ -291,6 +300,12 @@ btle_text_processor () {
 		[ -n "${blacklisted_devices[$received_mac_address]}" ] && return 0
 
 		if [ "$tx_type" == "PUBL" ]; then 
+			
+			#IF WHITELIST MODE, ONLY REPORT WHITELISTED DEVICES
+			if [ "$PREF_WHITELIST_ONLY_MODE" == true ] && [ -z "${whitelisted_devices[$received_mac_address]}" ]; then
+				return 0
+			fi
+
 			#PRINT ALL PUBLIC BEACONS
 			printf "%s\n" "$tx_type$received_mac_address|$pdu_type|$gap_name_str|$rssi_value|$adv_data|$manufacturer|$device_type|$flags|$oem_data|$timestamp|$resolvable|$hex_data" > main_pipe
 
