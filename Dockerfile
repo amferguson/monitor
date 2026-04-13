@@ -14,5 +14,7 @@ ENV PREF_CONFIG_DIR=/config \
 COPY entrypoint.sh /monitor/entrypoint.sh
 COPY health.sh /usr/local/bin/health
 
+RUN chmod +x /monitor/entrypoint.sh /usr/local/bin/health
+
 CMD ["./entrypoint.sh"]
 HEALTHCHECK CMD health
