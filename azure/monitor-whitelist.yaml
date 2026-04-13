@@ -1,0 +1,26 @@
+# monitor-whitelist.yaml
+trigger:
+  branches:
+    include: 
+      - whitelist
+
+pool:
+  vmImage: 'ubuntu-latest'
+
+variables:
+  imageName: 'robinsnest1/tools/monitor-whitelist'
+  serviceConnection: 'GitLab-Service-Connection'
+
+steps:
+- task: Docker@2
+  displayName: 'Build and Push Container'
+  inputs:
+    containerRegistry: $(serviceConnection)
+    repository: $(imageName)
+    command: 'buildAndPush'
+    Dockerfile: 'Dockerfile'
+    # CRITICAL: Context is '.' (repo root) so it can see shared projects
+    buildContext: '.' 
+    tags: |
+      latest
+      $(Build.BuildId)
